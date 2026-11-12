@@ -1,6 +1,6 @@
 // 화면용 순수 함수는 입력과 출력만 확인한다.
 import { describe, expect, it } from "vitest";
-import type { Todo } from "./todo-storage";
+import type { Todo } from "./todo-model";
 import {
   ALL_CATEGORIES,
   countRemaining,

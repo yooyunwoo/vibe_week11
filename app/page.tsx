@@ -1,23 +1,24 @@
 "use client";
 
-// 화면 파일. 저장은 직접 하지 않고 lib/todo-storage.ts의 함수만 호출한다.
+// 화면 파일. 저장소를 직접 만지지 않고, 서버 함수(actions.ts)만 호출한다. (docs/adr/0003 참고)
 
 import { useEffect, useRef, useState } from "react";
 import {
-  addCategory,
-  addTodo,
-  deleteCategory,
-  deleteCompletedTodos,
-  deleteTodo,
-  listCategories,
-  listTodos,
+  addCategoryAction,
+  addTodoAction,
+  deleteCategoryAction,
+  deleteCompletedAction,
+  deleteTodoAction,
+  loadSnapshot,
+  toggleTodoAction,
+  updateTodoAction,
+} from "./actions";
+import {
   normalizeTitle,
-  toggleTodo,
-  updateTodoCategory,
-  updateTodoTitle,
   type Category,
+  type Snapshot,
   type Todo,
-} from "./lib/todo-storage";
+} from "./lib/todo-model";
 import {
   ALL_CATEGORIES,
   countRemaining,
@@ -50,6 +51,9 @@ export default function Home() {
   const [categoryError, setCategoryError] = useState("");
   // 저장소에서 처음 불러오기 전에는 안내 문구가 깜빡이지 않도록 구분한다
   const [loaded, setLoaded] = useState(false);
+  // 불러오기나 저장에 실패했을 때 사용자에게 보여 줄 안내
+  const [loadFailed, setLoadFailed] = useState(false);
+  const [error, setError] = useState("");
   // 선택한 필터들. 둘 다 앱을 열 때마다 "전체"로 시작하고 저장하지 않는다.
   const [statusFilter, setStatusFilter] = useState<StatusFilter>(
     DEFAULT_STATUS_FILTER,
@@ -65,47 +69,66 @@ export default function Home() {
   // Enter/Esc/바깥 클릭이 겹쳐도 저장이 두 번 일어나지 않게 막는 표시
   const editingRef = useRef<string | null>(null);
 
-  // 저장소에서 목록을 다시 불러와 화면에 반영
-  async function refresh() {
-    setTodos(await listTodos());
-    setCategories(await listCategories());
+  // 서버가 돌려준 최신 목록을 화면에 반영
+  function apply(snapshot: Snapshot) {
+    setTodos(snapshot.todos);
+    setCategories(snapshot.categories);
+  }
+
+  // 서버 함수 호출을 감싼다. 실패하면 화면의 목록은 그대로 두고(변경된 것처럼 보이지 않게) 안내만 띄운다.
+  async function run<T>(call: () => Promise<T>): Promise<T | null> {
+    try {
+      const result = await call();
+      setError("");
+      return result;
+    } catch {
+      setError("저장하지 못했어요. 인터넷 연결을 확인하고 다시 시도해 주세요.");
+      return null;
+    }
   }
 
   // 처음 화면이 뜰 때 한 번 불러온다
   useEffect(() => {
-    Promise.all([listTodos(), listCategories()]).then(([list, cats]) => {
-      setTodos(list);
-      setCategories(cats);
-      setLoaded(true);
-    });
+    loadSnapshot()
+      .then((snapshot) => {
+        setTodos(snapshot.todos);
+        setCategories(snapshot.categories);
+        setLoaded(true);
+      })
+      .catch(() => setLoadFailed(true));
   }, []);
 
   async function handleAdd(e: React.FormEvent) {
     e.preventDefault();
     const normalized = normalizeTitle(title);
     if (normalized === null) return;
-    await addTodo(normalized, newTodoCategoryId || null);
+    const snapshot = await run(() =>
+      addTodoAction(normalized, newTodoCategoryId || null),
+    );
+    if (!snapshot) return; // 실패하면 입력한 제목을 그대로 둔다
+    apply(snapshot);
     setTitle("");
-    await refresh();
   }
 
   async function handleToggle(id: string) {
-    await toggleTodo(id);
-    await refresh();
+    const snapshot = await run(() => toggleTodoAction(id));
+    if (snapshot) apply(snapshot);
   }
 
   async function handleDelete(id: string) {
-    await deleteTodo(id);
-    await refresh();
+    const snapshot = await run(() => deleteTodoAction(id));
+    if (snapshot) apply(snapshot);
   }
 
-  // 카테고리 추가: 빈 이름/중복 이름은 저장소가 거부하고, 이유를 화면에 알려준다
+  // 카테고리 추가: 빈 이름/중복 이름은 서버가 거부하고, 이유를 화면에 알려준다
   async function handleAddCategory(e: React.FormEvent) {
     e.preventDefault();
-    const result = await addCategory(categoryName);
-    if (!result.ok) {
+    const response = await run(() => addCategoryAction(categoryName));
+    if (!response) return;
+    apply(response.snapshot);
+    if (!response.result.ok) {
       setCategoryError(
-        result.reason === "empty"
+        response.result.reason === "empty"
           ? "카테고리 이름을 입력하세요"
           : "이미 있는 카테고리예요",
       );
@@ -113,7 +136,6 @@ export default function Home() {
     }
     setCategoryError("");
     setCategoryName("");
-    await refresh();
   }
 
   // 카테고리 삭제: 그 안의 할 일은 지워지지 않고 미분류가 된다
@@ -124,15 +146,16 @@ export default function Home() {
       )
     )
       return;
-    await deleteCategory(category.id);
+    const snapshot = await run(() => deleteCategoryAction(category.id));
+    if (!snapshot) return;
+    apply(snapshot);
     // 삭제한 카테고리가 추가용 드롭다운에 선택되어 있었다면 미분류로 되돌린다
     if (newTodoCategoryId === category.id) setNewTodoCategoryId("");
     // 보고 있던 카테고리를 삭제했다면 필터를 "전체"로 되돌린다
     if (categoryFilter === category.id) setCategoryFilter(ALL_CATEGORIES);
-    await refresh();
   }
 
-  // 더블클릭하거나 ✏️ 버튼을 누르면 수정을 시작한다
+  // 더블클릭하거나 수정 버튼을 누르면 수정을 시작한다
   function startEditing(todo: Todo) {
     editingRef.current = todo.id;
     setEditingId(todo.id);
@@ -140,23 +163,24 @@ export default function Home() {
     setEditingCategoryId(todo.categoryId ?? "");
   }
 
-  // 수정 끝내기: save가 true면 저장(빈 제목이면 저장소가 거부해 원래 제목 유지), false면 취소
+  // 수정 끝내기: save가 true면 저장(빈 제목이면 서버가 거부해 원래 제목 유지), false면 취소
   async function finishEditing(id: string, save: boolean) {
     if (editingRef.current !== id) return;
     editingRef.current = null;
     setEditingId(null);
     if (save) {
-      await updateTodoTitle(id, editingTitle);
-      await updateTodoCategory(id, editingCategoryId || null);
-      await refresh();
+      const snapshot = await run(() =>
+        updateTodoAction(id, editingTitle, editingCategoryId || null),
+      );
+      if (snapshot) apply(snapshot);
     }
   }
 
   // 완료된 항목 모두 삭제 (되돌릴 수 없으므로 한 번 확인한다)
   async function handleDeleteCompleted() {
     if (!window.confirm("완료된 항목을 모두 삭제할까요?")) return;
-    await deleteCompletedTodos();
-    await refresh();
+    const snapshot = await run(() => deleteCompletedAction());
+    if (snapshot) apply(snapshot);
   }
 
   // 남은 할 일 개수: 전체 Todo 중 완료되지 않은 것만 센다 (필터와 상관없이, 저장하지 않고 계산)
@@ -210,6 +234,34 @@ export default function Home() {
           />
         </div>
       </header>
+
+      {/* 불러오기 또는 저장에 실패했을 때: 무엇이 잘못됐고 어떻게 하면 되는지 알려 준다 */}
+      {loadFailed && (
+        <div
+          role="alert"
+          className="mb-6 rounded-xl border border-line bg-surface p-4 text-sm"
+        >
+          <p className="text-danger">할 일을 불러오지 못했어요.</p>
+          <p className="mt-1 text-soft">
+            인터넷 연결을 확인한 뒤 다시 시도해 주세요. 저장된 데이터는 지워지지 않았어요.
+          </p>
+          <button
+            type="button"
+            onClick={() => window.location.reload()}
+            className="mt-3 rounded-lg bg-accent px-3 py-1.5 font-medium text-accent-ink hover:opacity-90"
+          >
+            다시 불러오기
+          </button>
+        </div>
+      )}
+      {error && (
+        <p
+          role="alert"
+          className="mb-4 rounded-lg bg-accent-soft px-3 py-2 text-sm text-danger"
+        >
+          {error}
+        </p>
+      )}
 
       {/* 할 일 추가: 입력창, 카테고리, 버튼을 한 줄로 */}
       <form

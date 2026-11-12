@@ -1,7 +1,7 @@
 // 화면에 보여줄 Todo를 고르는 계산. 저장소와 화면 어디에도 의존하지 않는 순수 함수다.
 // 나중에 필터(상태/카테고리)를 추가할 때 이 파일에서 확장한다.
 
-import type { Todo } from "./todo-storage";
+import type { Todo } from "./todo-model";
 
 // 필터: 화면 상태일 뿐이며 저장하지 않는다. 앱을 열면 항상 "all"로 시작한다.
 export type StatusFilter = "all" | "active" | "completed";
